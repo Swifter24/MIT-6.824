@@ -50,7 +50,7 @@ type mapTask struct {
 
 // Your code here -- RPC handlers for the worker to call.
 /*
-1.分Map任务给worker,worker完成之后call一个task ok(15s计时)
+1.分Map任务给worker,worker完成之后call一个task ok(5s计时)
 2.全部Map完成后开始reduce,每个key的所有values传给worker
 3.写入文件mr-out-x 先排序好所有的intermediate
 4.关闭所有worker后退出自己
@@ -112,7 +112,7 @@ func (c *Coordinator) MrTask(args *MrTaskArgs, reply *MrTaskReply) error {
 }
 
 func (c *Coordinator) checkTaskTimeout(taskType int, mapName string, reduceID int) {
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.NewTimer(15 * time.Second)
 	<-timer.C
 	c.lock.Lock()
 	defer c.lock.Unlock()
