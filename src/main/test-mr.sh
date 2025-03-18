@@ -42,7 +42,8 @@ fi
 rm -rf mr-tmp
 mkdir mr-tmp || exit 1
 cd mr-tmp || exit 1
-rm -f mr-*
+
+#rm -f mr-*
 
 # make sure software is freshly built.
 (cd ../../mrapps && go clean)

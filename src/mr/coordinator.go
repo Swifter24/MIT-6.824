@@ -13,13 +13,10 @@ import "net/http"
 type Coordinator struct {
 	//Mutex锁
 	lock sync.Mutex
-
 	//Reduce任务数量
 	reduceCount int
-
 	//Worker进程ID
 	workers []int
-
 	//当前状态, 0正在做map任务, 1正在做Reduce任务, 2等Worker全部退出
 	status int
 
@@ -53,7 +50,7 @@ type mapTask struct {
 
 // Your code here -- RPC handlers for the worker to call.
 /*
-1.分Map任务给worker,worker完成之后call一个task ok(10s计时)
+1.分Map任务给worker,worker完成之后call一个task ok(15s计时)
 2.全部Map完成后开始reduce,每个key的所有values传给worker
 3.写入文件mr-out-x 先排序好所有的intermediate
 4.关闭所有worker后退出自己
@@ -84,7 +81,7 @@ func (c *Coordinator) MrTask(args *MrTaskArgs, reply *MrTaskReply) error {
 		reply.MapID = c.mapTasks[mapName].id
 		reply.MapName = mapName
 		reply.TaskType = 1
-		reply.ReduceCount = c.reduceCount
+		reply.ReduceCount = c.reduceCount //Worker 知道 Reduce 任务的总数，以便正确地进行数据分区
 		go c.checkTaskTimeout(1, mapName, 0)
 	} else if c.status == 1 {
 		//做Reduce任务
@@ -105,7 +102,7 @@ func (c *Coordinator) MrTask(args *MrTaskArgs, reply *MrTaskReply) error {
 		}
 		reply.TaskType = 2
 		reply.ReduceID = reduceID
-		reply.MapTaskCount = c.mapTaskDoneCount
+		reply.MapTaskCount = c.mapTaskDoneCount //确保 Reduce 任务在所有 Map 任务完成后才开始，避免 Reduce 任务读取不完整的数据
 		go c.checkTaskTimeout(2, "", reduceID)
 	} else if c.status == 2 {
 		//所有任务完成
@@ -115,25 +112,31 @@ func (c *Coordinator) MrTask(args *MrTaskArgs, reply *MrTaskReply) error {
 }
 
 func (c *Coordinator) checkTaskTimeout(taskType int, mapName string, reduceID int) {
-	time.Sleep(5 * time.Second)
+	timer := time.NewTimer(10 * time.Second)
+	<-timer.C
 	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// 确保任务仍未完成再执行超时处理
 	if taskType == 1 {
-		if c.mapTasks[mapName].done == false {
-			log.Printf("Map task[%v] dead, worker[%v] dead! ", mapName, c.mapTasks[mapName].workerID)
-			c.mapTasks[mapName].working = false
-			c.deleteWorker(c.mapTasks[mapName].workerID)
+		if task, exists := c.mapTasks[mapName]; exists && !task.done && task.working {
+			log.Printf("Map task [%v] timeout, reassigning...", mapName)
+			task.working = false
+			c.deleteWorker(task.workerID)
 		}
 	}
 	if taskType == 2 {
-		if c.reduceTasks[reduceID].done == false {
-			log.Printf("Reduce task[%v] dead, worker[%v] dead! ", reduceID, c.reduceTasks[reduceID].workerID)
-			c.reduceTasks[reduceID].working = false
-			c.deleteWorker(c.reduceTasks[reduceID].workerID)
+		if reduceID >= 0 && reduceID < len(c.reduceTasks) {
+			task := c.reduceTasks[reduceID]
+			if !task.done && task.working {
+				log.Printf("Reduce task [%v] timeout, reassigning...", reduceID)
+				task.working = false
+				c.deleteWorker(task.workerID)
+			}
 		}
 	}
 }
 
-// 删除worker时 需要提前lock
 func (c *Coordinator) deleteWorker(workerID int) {
 	workerKey := -1
 	for i, worker := range c.workers {
@@ -143,14 +146,16 @@ func (c *Coordinator) deleteWorker(workerID int) {
 		}
 	}
 	if workerKey == -1 {
-		log.Printf("Worker [%v] exit error! worker is not exist or something wrong!", workerID)
-	} else {
-		c.workers = append(c.workers[:workerKey], c.workers[workerKey+1:]...)
+		log.Printf("Worker [%v] exit error! worker is not exist or already removed!", workerID)
+		return
 	}
+	// 从 workers 列表移除
+	c.workers = append(c.workers[:workerKey], c.workers[workerKey+1:]...)
+	log.Printf("Worker [%v] removed from coordinator!", workerID)
 }
 
 // WorkerExit Worker退出回传
-func (c *Coordinator) WorkerExit(args *WorkerExitArgs) error {
+func (c *Coordinator) WorkerExit(args *WorkerExitArgs, n *None) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	log.Printf("Worker [%v] exit!", args.WorkerID)
@@ -158,33 +163,43 @@ func (c *Coordinator) WorkerExit(args *WorkerExitArgs) error {
 	return nil
 }
 
-func (c *Coordinator) TaskDone(args *TaskDoneArgs) error {
+func (c *Coordinator) TaskDone(args *TaskDoneArgs, n *None) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+
 	if args.TaskType == 1 {
-		c.mapTasks[args.MapName].done = true
-		c.mapTasks[args.MapName].working = false
-		c.mapTaskDoneCount++
-		log.Printf("Map task[%v] done!", args.MapName)
+		if task, exists := c.mapTasks[args.MapName]; exists && !task.done {
+			task.done = true
+			task.working = false
+			c.mapTaskDoneCount++
+			log.Printf("Map task [%v] done!", args.MapName)
+		}
+		// 确保所有 Map 任务完成后，才修改状态
 		if c.mapTaskDoneCount == len(c.mapTasks) {
 			c.status = 1
-			log.Printf("all map tasks done!")
+			log.Printf("All map tasks done! Starting Reduce phase.")
 		}
 	} else if args.TaskType == 2 {
-		c.reduceTasks[args.ReduceID].done = true
-		c.reduceTasks[args.ReduceID].working = false
-		c.reduceTaskDoneCount++
-		log.Printf("Reduce task[%v] done!", args.ReduceID)
+		if args.ReduceID >= 0 && args.ReduceID < len(c.reduceTasks) {
+			task := c.reduceTasks[args.ReduceID]
+			if !task.done {
+				task.done = true
+				task.working = false
+				c.reduceTaskDoneCount++
+				log.Printf("Reduce task [%v] done!", args.ReduceID)
+			}
+		}
+		// 确保所有 Reduce 任务完成后，才修改状态
 		if c.reduceTaskDoneCount == len(c.reduceTasks) {
 			c.status = 2
-			log.Printf("All reduce tasks done!")
+			log.Printf("All reduce tasks done! Coordinator is finishing.")
 		}
 	}
 	return nil
 }
 
 // RegisterWorker Worker访问此接口来注册到Coordinator,传回一个ID
-func (c *Coordinator) RegisterWorker(workerID *int) error {
+func (c *Coordinator) RegisterWorker(n *None, workerID *int) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	*workerID = len(c.workers)
