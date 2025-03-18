@@ -49,12 +49,6 @@ type mapTask struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-/*
-1.分Map任务给worker,worker完成之后call一个task ok(5s计时)
-2.全部Map完成后开始reduce,每个key的所有values传给worker
-3.写入文件mr-out-x 先排序好所有的intermediate
-4.关闭所有worker后退出自己
-*/
 
 // the RPC argument and reply types are defined in rpc.go.
 func (c *Coordinator) MrTask(args *MrTaskArgs, reply *MrTaskReply) error {
@@ -154,7 +148,6 @@ func (c *Coordinator) deleteWorker(workerID int) {
 	log.Printf("Worker [%v] removed from coordinator!", workerID)
 }
 
-// WorkerExit Worker退出回传
 func (c *Coordinator) WorkerExit(args *WorkerExitArgs, n *None) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -198,7 +191,6 @@ func (c *Coordinator) TaskDone(args *TaskDoneArgs, n *None) error {
 	return nil
 }
 
-// RegisterWorker Worker访问此接口来注册到Coordinator,传回一个ID
 func (c *Coordinator) RegisterWorker(n *None, workerID *int) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
